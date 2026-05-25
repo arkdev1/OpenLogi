@@ -24,3 +24,6 @@ devenv.local.yaml
 
 # Local planning doc — kept on disk, never committed.
 /UI.md
+
+# macOS finder metadata
+.DS_Store
