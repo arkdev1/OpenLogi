@@ -195,6 +195,9 @@ pub enum Action {
     // ── DPI ──────────────────────────────────────────────────────────────────
     /// Step through the configured DPI preset list (P1.7).
     CycleDpiPresets,
+    /// Jump to a specific zero-based preset in the device's DPI preset list.
+    /// Out-of-range indices clamp to the list length at fire time (P1.7).
+    SetDpiPreset(u8),
     /// Toggle the HID++ SmartShift ratchet/free-spin wheel mode (P1.1).
     ToggleSmartShift,
 
@@ -219,47 +222,52 @@ pub enum Action {
 
 impl Action {
     /// Display label for the popover row.
+    ///
+    /// Returns `String` rather than `&str` so parameterized variants (e.g.
+    /// `SetDpiPreset(i)`, `CustomShortcut(s)`) can build a label that
+    /// includes their payload.
     #[must_use]
-    pub fn label(&self) -> &str {
+    pub fn label(&self) -> String {
         match self {
-            Action::LeftClick => "Left Click",
-            Action::RightClick => "Right Click",
-            Action::MiddleClick => "Middle Click",
-            Action::Copy => "Copy",
-            Action::Paste => "Paste",
-            Action::Cut => "Cut",
-            Action::Undo => "Undo",
-            Action::Redo => "Redo",
-            Action::SelectAll => "Select All",
-            Action::Find => "Find",
-            Action::Save => "Save",
-            Action::BrowserBack => "Browser Back",
-            Action::BrowserForward => "Browser Forward",
-            Action::NewTab => "New Tab",
-            Action::CloseTab => "Close Tab",
-            Action::ReopenTab => "Reopen Tab",
-            Action::NextTab => "Next Tab",
-            Action::PrevTab => "Previous Tab",
-            Action::ReloadPage => "Reload Page",
-            Action::MissionControl => "Mission Control",
-            Action::AppExpose => "App Exposé",
-            Action::ShowDesktop => "Show Desktop",
-            Action::LaunchpadShow => "Launchpad",
-            Action::LockScreen => "Lock Screen",
-            Action::Screenshot => "Screenshot",
-            Action::PlayPause => "Play / Pause",
-            Action::NextTrack => "Next Track",
-            Action::PrevTrack => "Previous Track",
-            Action::VolumeUp => "Volume Up",
-            Action::VolumeDown => "Volume Down",
-            Action::MuteVolume => "Mute",
-            Action::CycleDpiPresets => "Cycle DPI Presets",
-            Action::ToggleSmartShift => "Toggle SmartShift",
-            Action::ScrollUp => "Scroll Up",
-            Action::ScrollDown => "Scroll Down",
-            Action::HorizontalScrollLeft => "Scroll Left",
-            Action::HorizontalScrollRight => "Scroll Right",
-            Action::CustomShortcut(s) => s.as_str(),
+            Action::LeftClick => "Left Click".into(),
+            Action::RightClick => "Right Click".into(),
+            Action::MiddleClick => "Middle Click".into(),
+            Action::Copy => "Copy".into(),
+            Action::Paste => "Paste".into(),
+            Action::Cut => "Cut".into(),
+            Action::Undo => "Undo".into(),
+            Action::Redo => "Redo".into(),
+            Action::SelectAll => "Select All".into(),
+            Action::Find => "Find".into(),
+            Action::Save => "Save".into(),
+            Action::BrowserBack => "Browser Back".into(),
+            Action::BrowserForward => "Browser Forward".into(),
+            Action::NewTab => "New Tab".into(),
+            Action::CloseTab => "Close Tab".into(),
+            Action::ReopenTab => "Reopen Tab".into(),
+            Action::NextTab => "Next Tab".into(),
+            Action::PrevTab => "Previous Tab".into(),
+            Action::ReloadPage => "Reload Page".into(),
+            Action::MissionControl => "Mission Control".into(),
+            Action::AppExpose => "App Exposé".into(),
+            Action::ShowDesktop => "Show Desktop".into(),
+            Action::LaunchpadShow => "Launchpad".into(),
+            Action::LockScreen => "Lock Screen".into(),
+            Action::Screenshot => "Screenshot".into(),
+            Action::PlayPause => "Play / Pause".into(),
+            Action::NextTrack => "Next Track".into(),
+            Action::PrevTrack => "Previous Track".into(),
+            Action::VolumeUp => "Volume Up".into(),
+            Action::VolumeDown => "Volume Down".into(),
+            Action::MuteVolume => "Mute".into(),
+            Action::CycleDpiPresets => "Cycle DPI Presets".into(),
+            Action::SetDpiPreset(i) => format!("DPI Preset {}", i + 1),
+            Action::ToggleSmartShift => "Toggle SmartShift".into(),
+            Action::ScrollUp => "Scroll Up".into(),
+            Action::ScrollDown => "Scroll Down".into(),
+            Action::HorizontalScrollLeft => "Scroll Left".into(),
+            Action::HorizontalScrollRight => "Scroll Right".into(),
+            Action::CustomShortcut(s) => s.clone(),
         }
     }
 
@@ -298,7 +306,9 @@ impl Action {
             | Action::VolumeUp
             | Action::VolumeDown
             | Action::MuteVolume => Category::Media,
-            Action::CycleDpiPresets | Action::ToggleSmartShift => Category::Dpi,
+            Action::CycleDpiPresets | Action::SetDpiPreset(_) | Action::ToggleSmartShift => {
+                Category::Dpi
+            }
             Action::ScrollUp
             | Action::ScrollDown
             | Action::HorizontalScrollLeft
@@ -448,7 +458,7 @@ impl Action {
             Action::VolumeDown => macos::post_key(0x49, none),
             Action::MuteVolume => macos::post_key(0x4A, none),
             // ── DPI / SmartShift: handled at hook/HID layer ───────────────────
-            Action::CycleDpiPresets | Action::ToggleSmartShift => {
+            Action::CycleDpiPresets | Action::SetDpiPreset(_) | Action::ToggleSmartShift => {
                 tracing::debug!(
                     action = self.label(),
                     "device action handled by hook/HID layer"

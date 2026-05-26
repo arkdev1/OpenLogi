@@ -42,6 +42,42 @@ pub struct DeviceRecord {
     pub dpi_target: Option<DpiTarget>,
 }
 
+/// Shared state consumed by the OS hook thread (P0.1) and the DPI panel UI
+/// to implement [`Action::CycleDpiPresets`] / [`Action::SetDpiPreset`].
+///
+/// `index` is the position of the *current* DPI (i.e. the one last set on the
+/// device), not the next-to-fire. `cycle` advances and returns the new value.
+#[derive(Debug, Clone, Default)]
+pub struct DpiCycleState {
+    pub presets: Vec<u32>,
+    pub index: usize,
+    pub target: Option<DpiTarget>,
+}
+
+impl DpiCycleState {
+    /// Advance to the next preset (wrapping last → first) and return the new
+    /// DPI + the device target to write to. Returns `None` if `presets` is
+    /// empty.
+    pub fn cycle(&mut self) -> Option<(u32, Option<DpiTarget>)> {
+        if self.presets.is_empty() {
+            return None;
+        }
+        self.index = (self.index + 1) % self.presets.len();
+        Some((self.presets[self.index], self.target.clone()))
+    }
+
+    /// Jump to preset `i`, clamping to the list length. Returns the DPI +
+    /// target, or `None` if `presets` is empty.
+    pub fn set(&mut self, i: usize) -> Option<(u32, Option<DpiTarget>)> {
+        if self.presets.is_empty() {
+            return None;
+        }
+        let clamped = i.min(self.presets.len() - 1);
+        self.index = clamped;
+        Some((self.presets[clamped], self.target.clone()))
+    }
+}
+
 pub struct AppState {
     /// Index into [`Self::device_list`] of the currently visible device. May
     /// be out of bounds briefly while inventories re-enumerate; views must
@@ -65,6 +101,9 @@ pub struct AppState {
     /// hook holds the other `Arc` clone; writes here are picked up by the next
     /// hook callback without GPUI thread involvement.
     pub hook_bindings: Arc<RwLock<BTreeMap<ButtonId, Action>>>,
+    /// Shared DPI-cycle state consumed by the hook thread when dispatching
+    /// [`Action::CycleDpiPresets`] / [`Action::SetDpiPreset`].
+    pub dpi_cycle: Arc<RwLock<DpiCycleState>>,
 }
 
 impl AppState {
@@ -82,20 +121,22 @@ impl AppState {
         inventories: &[DeviceInventory],
         cache: &AssetCache,
     ) -> Self {
-        let arc = Arc::new(RwLock::new(BTreeMap::new()));
-        Self::with_runtime_shared(config, inventories, cache, arc)
+        let bindings_arc = Arc::new(RwLock::new(BTreeMap::new()));
+        let cycle_arc = Arc::new(RwLock::new(DpiCycleState::default()));
+        Self::with_runtime_shared(config, inventories, cache, bindings_arc, cycle_arc)
     }
 
-    /// Like [`Self::with_runtime`] but re-uses an existing `Arc` so the
-    /// hook thread and `AppState` share the same binding map. The `Arc` is
-    /// rewritten to match the resolved initial bindings so the hook sees
-    /// the correct state from the very first captured event.
+    /// Like [`Self::with_runtime`] but re-uses existing `Arc`s so the hook
+    /// thread and `AppState` share the same maps. Both arcs are rewritten to
+    /// match the resolved initial state so the hook sees correct values from
+    /// the very first captured event.
     #[must_use]
     pub fn with_runtime_shared(
         config: Config,
         inventories: &[DeviceInventory],
         cache: &AssetCache,
         hook_bindings: Arc<RwLock<BTreeMap<ButtonId, Action>>>,
+        dpi_cycle: Arc<RwLock<DpiCycleState>>,
     ) -> Self {
         let device_list = build_device_list(inventories, cache);
         let current_device = pick_initial_device(&device_list, config.selected_device());
@@ -107,9 +148,11 @@ impl AppState {
             device_list,
             config,
             hook_bindings,
+            dpi_cycle,
         };
         state.button_bindings = state.bindings_for_current();
         state.sync_hook_bindings();
+        state.sync_dpi_cycle();
         state
     }
 
@@ -132,11 +175,41 @@ impl AppState {
         self.current_device = idx;
         self.button_bindings = self.bindings_for_current();
         self.sync_hook_bindings();
+        self.sync_dpi_cycle();
         let key = self.current_record().map(|r| r.config_key.clone());
         self.config.set_selected_device(key);
         if let Err(e) = self.config.save_atomic() {
             warn!(error = %e, "could not persist selected device");
         }
+    }
+
+    /// Replace the DPI preset list for the currently selected device. The
+    /// new list is persisted to `config.toml` and pushed into the shared
+    /// hook map so the next `CycleDpiPresets` press sees it. The cycle
+    /// `index` is reset to 0 — the user just rebuilt the list, the old
+    /// index is meaningless.
+    ///
+    /// No-op when no device is selected (binding panel won't expose the
+    /// editor in that state).
+    pub fn commit_dpi_presets(&mut self, presets: Vec<u32>) {
+        let Some(key) = self.current_record().map(|r| r.config_key.clone()) else {
+            debug!("no active device key — DPI presets kept in memory only");
+            return;
+        };
+        self.config.set_dpi_presets(&key, presets);
+        if let Err(e) = self.config.save_atomic() {
+            warn!(error = %e, "could not persist DPI presets to config.toml");
+        }
+        self.sync_dpi_cycle();
+    }
+
+    /// Read the DPI preset list for the active device, or an empty `Vec`
+    /// when no device is selected. UI helper.
+    #[must_use]
+    pub fn dpi_presets(&self) -> Vec<u32> {
+        self.current_record()
+            .map(|r| self.config.dpi_presets(&r.config_key))
+            .unwrap_or_default()
     }
 
     /// Update a single binding in memory, on disk, and in the shared hook
@@ -204,6 +277,33 @@ impl AppState {
                 warn!(
                     error = %e,
                     "hook_bindings lock poisoned — hook will keep stale bindings"
+                );
+            }
+        }
+    }
+
+    /// Rebuild [`Self::dpi_cycle`] from the active device's stored presets
+    /// and DPI target. Called on initial build, device switch, and preset
+    /// commits. The cycle index resets to 0 since the list contents may
+    /// have changed.
+    fn sync_dpi_cycle(&self) {
+        let presets = self
+            .current_record()
+            .map(|r| self.config.dpi_presets(&r.config_key))
+            .unwrap_or_default();
+        let target = self.current_record().and_then(|r| r.dpi_target.clone());
+        match self.dpi_cycle.write() {
+            Ok(mut guard) => {
+                *guard = DpiCycleState {
+                    presets,
+                    index: 0,
+                    target,
+                };
+            }
+            Err(e) => {
+                warn!(
+                    error = %e,
+                    "dpi_cycle lock poisoned — hook will keep stale presets"
                 );
             }
         }

@@ -52,6 +52,12 @@ impl Default for Config {
 pub struct DeviceConfig {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub button_bindings: BTreeMap<ButtonId, Action>,
+    /// Ordered list of DPI presets cycled through by
+    /// [`Action::CycleDpiPresets`] and indexed by
+    /// [`Action::SetDpiPreset`]. Empty means "no presets configured" —
+    /// the cycle action becomes a no-op until the user adds at least one.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dpi_presets: Vec<u32>,
 }
 
 #[derive(Debug, Error)]
@@ -167,6 +173,26 @@ impl Config {
     pub fn set_selected_device(&mut self, key: Option<String>) {
         self.selected_device = key;
     }
+
+    /// The ordered DPI preset list for `device_key`, or an empty `Vec` if the
+    /// device has none configured yet.
+    #[must_use]
+    pub fn dpi_presets(&self, device_key: &str) -> Vec<u32> {
+        self.devices
+            .get(device_key)
+            .map(|d| d.dpi_presets.clone())
+            .unwrap_or_default()
+    }
+
+    /// Replace the DPI preset list for `device_key`. Pass an empty `Vec` to
+    /// clear (the device block is kept; the field is just omitted on save
+    /// thanks to `skip_serializing_if`).
+    pub fn set_dpi_presets(&mut self, device_key: &str, presets: Vec<u32>) {
+        self.devices
+            .entry(device_key.to_string())
+            .or_default()
+            .dpi_presets = presets;
+    }
 }
 
 fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
@@ -275,6 +301,34 @@ mod tests {
             err,
             ConfigError::UnsupportedSchemaVersion { found: 99, .. }
         ));
+    }
+
+    #[test]
+    fn dpi_presets_roundtrip_per_device() {
+        let mut cfg = Config::default();
+        cfg.set_dpi_presets("2b042", vec![800, 1600, 3200]);
+        cfg.set_dpi_presets("4082d", vec![400, 1600]);
+
+        let parsed = write_and_read(&cfg);
+
+        assert_eq!(parsed.dpi_presets("2b042"), vec![800, 1600, 3200]);
+        assert_eq!(parsed.dpi_presets("4082d"), vec![400, 1600]);
+        assert!(parsed.dpi_presets("unknown").is_empty());
+    }
+
+    #[test]
+    fn empty_dpi_presets_skip_serialization() {
+        let mut cfg = Config::default();
+        // Add a binding so the device block exists.
+        cfg.set_binding("2b042", ButtonId::Back, Action::Copy);
+        cfg.set_dpi_presets("2b042", vec![800]);
+        cfg.set_dpi_presets("2b042", vec![]); // clear
+
+        let body = toml::to_string_pretty(&cfg).expect("serialize");
+        assert!(
+            !body.contains("dpi_presets"),
+            "empty dpi_presets should be omitted: {body}"
+        );
     }
 
     #[test]

@@ -11,18 +11,20 @@
 //! doesn't change DPI.
 
 use gpui::{
-    AppContext as _, BorrowAppContext as _, Context, Entity, IntoElement, ParentElement, Render,
-    Styled, Subscription, Window, div, px, rgb,
+    AnyElement, AppContext as _, BorrowAppContext as _, Context, Entity, InteractiveElement,
+    IntoElement, ParentElement, Render, StatefulInteractiveElement as _, Styled, Subscription,
+    Window, div, px, rgb,
 };
 use gpui_component::{
     ActiveTheme, h_flex,
     slider::{Slider, SliderEvent, SliderState},
     v_flex,
 };
-use tracing::{debug, warn};
+use tracing::debug;
 
+use crate::hardware::write_dpi_in_background;
 use crate::state::AppState;
-use crate::theme::ACCENT_BLUE;
+use crate::theme::{ACCENT_BLUE, BORDER, SURFACE, SURFACE_HOVER, TEXT_MUTED, TEXT_PRIMARY};
 
 /// Identifies which physical device the slider should write DPI to.
 /// `receiver_uid` is the Bolt receiver's unique id (so we route writes
@@ -106,48 +108,19 @@ impl DpiPanel {
     }
 }
 
-/// Spawn an OS thread that runs a one-shot tokio runtime, fires the
-/// HID++ DPI write, and exits. We don't reuse GPUI's executor because
-/// `async-hid` carries macOS-specific transport bits that want a tokio
-/// reactor. One thread per slider release is cheap (~100 ms wall time)
-/// and avoids a long-lived background runtime.
-fn write_dpi_in_background(target: Option<DpiTarget>, dpi: u32) {
-    let Some(target) = target else {
-        debug!(dpi, "no target device — UI-only DPI update");
-        return;
-    };
-    std::thread::spawn(move || {
-        let rt = match tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-        {
-            Ok(rt) => rt,
-            Err(e) => {
-                warn!(error = %e, "tokio runtime init failed; DPI write skipped");
-                return;
-            }
-        };
-        // DPI is bounded by `clamp_dpi` to [200, 6400] so the u16 cast
-        // is lossless.
-        let dpi_u16 = u16::try_from(dpi).unwrap_or(u16::MAX);
-        let result = rt.block_on(openlogi_hid::set_dpi(
-            Some(&target.receiver_uid),
-            target.slot,
-            dpi_u16,
-        ));
-        match result {
-            Ok(()) => debug!(slot = target.slot, dpi = dpi_u16, "DPI written to device"),
-            Err(e) => warn!(error = ?e, "DPI write failed"),
-        }
-    });
-}
-
 impl Render for DpiPanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let dpi = cx
+        let (dpi, presets) = cx
             .try_global::<AppState>()
-            .map_or(crate::state::DEFAULT_DPI, |s| s.dpi);
+            .map(|s| (s.dpi, s.dpi_presets()))
+            .unwrap_or((crate::state::DEFAULT_DPI, Vec::new()));
         let theme = cx.theme();
+
+        let preset_chips: Vec<AnyElement> = presets
+            .iter()
+            .enumerate()
+            .map(|(idx, value)| preset_chip(idx, *value, *value == dpi, presets.clone()))
+            .collect();
 
         v_flex()
             .gap_3()
@@ -170,7 +143,106 @@ impl Render for DpiPanel {
                     ),
             )
             .child(Slider::new(&self.slider_state).horizontal())
+            .child(
+                v_flex()
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(TEXT_MUTED))
+                            .child("PRESETS"),
+                    )
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .flex_wrap()
+                            .children(preset_chips)
+                            .child(add_preset_chip()),
+                    ),
+            )
     }
+}
+
+const CHIP_H: f32 = 28.;
+
+/// One DPI preset rendered as a chip. Clicking the chip writes that DPI to
+/// the device and updates `AppState.dpi`; the small × removes the preset.
+fn preset_chip(idx: usize, value: u32, active: bool, presets: Vec<u32>) -> AnyElement {
+    let presets_for_remove = presets.clone();
+    h_flex()
+        .id(("dpi-preset-chip", idx))
+        .h(px(CHIP_H))
+        .px_2()
+        .gap_2()
+        .items_center()
+        .rounded_md()
+        .border_1()
+        .border_color(rgb(if active { ACCENT_BLUE } else { BORDER }))
+        .bg(rgb(if active { SURFACE_HOVER } else { SURFACE }))
+        .hover(|s| s.bg(rgb(SURFACE_HOVER)))
+        .child(
+            div()
+                .id(("dpi-preset-apply", idx))
+                .text_sm()
+                .text_color(rgb(if active { ACCENT_BLUE } else { TEXT_PRIMARY }))
+                .child(format!("{value}"))
+                .on_click(move |_event, _window, cx| {
+                    let target = cx
+                        .try_global::<AppState>()
+                        .and_then(|s| s.current_record().and_then(|r| r.dpi_target.clone()));
+                    cx.update_global::<AppState, _>(|state, _| state.dpi = value);
+                    write_dpi_in_background(target, value);
+                    cx.refresh_windows();
+                }),
+        )
+        .child(
+            div()
+                .id(("dpi-preset-remove", idx))
+                .text_xs()
+                .text_color(rgb(TEXT_MUTED))
+                .child("×")
+                .on_click(move |_event, _window, cx| {
+                    let mut next = presets_for_remove.clone();
+                    if idx < next.len() {
+                        next.remove(idx);
+                    }
+                    cx.update_global::<AppState, _>(|state, _| state.commit_dpi_presets(next));
+                    cx.refresh_windows();
+                }),
+        )
+        .into_any_element()
+}
+
+/// "+" chip that snapshots `AppState.dpi` as a new preset.
+fn add_preset_chip() -> AnyElement {
+    h_flex()
+        .id("dpi-preset-add")
+        .h(px(CHIP_H))
+        .px_3()
+        .items_center()
+        .rounded_md()
+        .border_1()
+        .border_color(rgb(BORDER))
+        .bg(rgb(SURFACE))
+        .hover(|s| s.bg(rgb(SURFACE_HOVER)))
+        .child(
+            div()
+                .text_sm()
+                .text_color(rgb(TEXT_MUTED))
+                .child("+ Add"),
+        )
+        .on_click(|_event, _window, cx| {
+            // Append the current DPI to the active device's preset list.
+            // Duplicates are allowed — the user might want the same value
+            // appearing at multiple cycle positions for muscle-memory reasons.
+            cx.update_global::<AppState, _>(|state, _| {
+                let mut presets = state.dpi_presets();
+                presets.push(state.dpi);
+                state.commit_dpi_presets(presets);
+            });
+            cx.refresh_windows();
+        })
+        .into_any_element()
 }
 
 /// Snap a raw slider read to the discrete DPI step and clamp into range.

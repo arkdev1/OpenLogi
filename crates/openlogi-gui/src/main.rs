@@ -8,6 +8,7 @@ mod app;
 mod asset;
 mod components;
 mod data;
+mod hardware;
 mod mouse_model;
 mod state;
 mod theme;
@@ -32,7 +33,8 @@ use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
 use crate::app::AppView;
-use crate::state::AppState;
+use crate::hardware::write_dpi_in_background;
+use crate::state::{AppState, DpiCycleState};
 
 fn main() -> Result<()> {
     init_tracing();
@@ -54,16 +56,17 @@ fn main() -> Result<()> {
     }
     drop(probe_cache);
 
-    // Build the shared hook binding map from the on-disk config so the hook
-    // sees saved bindings from the first event, before AppState is initialised
-    // inside the GPUI thread. The Arc is also handed into the AppState global
-    // (see `cx.open_window` below) so that `commit_binding` writes are
-    // immediately visible to the hook callback.
-    let (hook_bindings, initial_config) = load_config_and_bindings(&inventories);
+    // Build the shared hook state from the on-disk config so the hook sees
+    // saved bindings + DPI presets from the first event, before AppState is
+    // initialised inside the GPUI thread. The Arcs are also handed into the
+    // AppState global (see `cx.open_window` below) so that subsequent
+    // `commit_binding` / `commit_dpi_presets` writes are visible to the hook
+    // callback without GPUI thread involvement.
+    let (hook_bindings, dpi_cycle, initial_config) = load_config_and_bindings(&inventories);
 
     // Start the OS hook. `_hook` is held alive for the duration of `run`;
-    // the binding Arc is captured by the callback closure.
-    let _hook = start_hook(Arc::clone(&hook_bindings));
+    // both Arcs are captured by the callback closure.
+    let _hook = start_hook(Arc::clone(&hook_bindings), Arc::clone(&dpi_cycle));
 
     gpui_platform::application().run(move |cx| {
         gpui_component::init(cx);
@@ -98,6 +101,7 @@ fn main() -> Result<()> {
                         &inventories,
                         &cache,
                         hook_bindings,
+                        dpi_cycle,
                     ));
                 }
                 let view = cx.new(|cx| AppView::new(&inventories, cx));
@@ -116,12 +120,15 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-/// Load config from disk and build the initial hook binding map for the
+/// Load config from disk and build the initial hook-shared state for the
 /// first paired device with HID++ model info — same selection rule as
-/// [`AppState::with_runtime`]. Pre-populating the `Arc` here means the hook
-/// callback sees the right bindings from the very first event, well before
-/// `AppState::with_runtime_shared` runs inside the GPUI thread.
-fn load_config_and_bindings(inventories: &[DeviceInventory]) -> (BindingMap, Config) {
+/// [`AppState::with_runtime`]. Pre-populating both `Arc`s here means the
+/// hook callback sees the right bindings *and* DPI presets from the very
+/// first event, well before `AppState::with_runtime_shared` runs inside
+/// the GPUI thread.
+fn load_config_and_bindings(
+    inventories: &[DeviceInventory],
+) -> (BindingMap, Arc<RwLock<DpiCycleState>>, Config) {
     let config = match Config::load_or_default() {
         Ok(c) => c,
         Err(e) => {
@@ -130,10 +137,23 @@ fn load_config_and_bindings(inventories: &[DeviceInventory]) -> (BindingMap, Con
         }
     };
 
-    let device_key = inventories
+    let (device_key, dpi_target) = inventories
         .iter()
-        .flat_map(|inv| inv.paired.iter())
-        .find_map(|p| p.model_info.as_ref().map(DeviceModelInfo::config_key));
+        .find_map(|inv| {
+            let receiver_uid = inv.receiver.unique_id.clone();
+            inv.paired.iter().find_map(|p| {
+                let model = p.model_info.as_ref()?;
+                let key = model.config_key();
+                let target = receiver_uid.as_ref().map(|uid| {
+                    crate::components::dpi_panel::DpiTarget {
+                        receiver_uid: uid.clone(),
+                        slot: p.slot,
+                    }
+                });
+                Some((Some(key), target))
+            })
+        })
+        .unwrap_or_default();
 
     let stored = device_key
         .as_deref()
@@ -148,14 +168,24 @@ fn load_config_and_bindings(inventories: &[DeviceInventory]) -> (BindingMap, Con
     for (k, v) in stored {
         bindings.insert(k, v);
     }
+    let bindings_arc = Arc::new(RwLock::new(bindings));
 
-    let arc = Arc::new(RwLock::new(bindings));
-    (arc, config)
+    let dpi_presets = device_key
+        .as_deref()
+        .map(|k| config.dpi_presets(k))
+        .unwrap_or_default();
+    let dpi_cycle_arc = Arc::new(RwLock::new(DpiCycleState {
+        presets: dpi_presets,
+        index: 0,
+        target: dpi_target,
+    }));
+
+    (bindings_arc, dpi_cycle_arc, config)
 }
 
 /// Attempt to start the OS hook. Returns `None` if Accessibility is not
 /// granted or on an unsupported platform — the app continues without crashing.
-fn start_hook(bindings: BindingMap) -> Option<Hook> {
+fn start_hook(bindings: BindingMap, dpi_cycle: Arc<RwLock<DpiCycleState>>) -> Option<Hook> {
     if !Hook::has_accessibility() {
         warn!(
             "Accessibility not granted — events will not be captured. \
@@ -180,8 +210,8 @@ fn start_hook(bindings: BindingMap) -> Option<Hook> {
                 if pressed {
                     let action = bindings.read().ok().and_then(|g| g.get(&id).cloned());
                     if let Some(action) = action {
-                        info!(button = %id, action = action.label(), "button → executing bound action");
-                        action.execute();
+                        info!(button = %id, action = %action.label(), "button → executing bound action");
+                        dispatch_action(&action, &dpi_cycle);
                     } else {
                         info!(button = %id, "button pressed with no binding — suppressed");
                     }
@@ -207,6 +237,49 @@ fn start_hook(bindings: BindingMap) -> Option<Hook> {
             warn!(error = %e, "could not install OS mouse hook — events will not be captured");
             None
         }
+    }
+}
+
+/// Route a bound action either to OS-level event synthesis
+/// ([`Action::execute`]) or to one of OpenLogi's hardware-side handlers
+/// (currently just DPI cycling).
+///
+/// `dpi_cycle` is held across a write lock long enough to advance the index
+/// and snapshot the new DPI + target; the actual HID write spawns its own
+/// thread via [`write_dpi_in_background`] to keep the hook callback
+/// non-blocking.
+fn dispatch_action(action: &Action, dpi_cycle: &Arc<RwLock<DpiCycleState>>) {
+    let next = match action {
+        Action::CycleDpiPresets => match dpi_cycle.write() {
+            Ok(mut guard) => guard.cycle(),
+            Err(e) => {
+                warn!(error = %e, "dpi_cycle lock poisoned — cycle skipped");
+                None
+            }
+        },
+        Action::SetDpiPreset(i) => match dpi_cycle.write() {
+            Ok(mut guard) => guard.set(usize::from(*i)),
+            Err(e) => {
+                warn!(error = %e, "dpi_cycle lock poisoned — set skipped");
+                None
+            }
+        },
+        other => {
+            other.execute();
+            None
+        }
+    };
+    if let Some((dpi, target)) = next {
+        info!(dpi, "DPI action → writing to device");
+        write_dpi_in_background(target, dpi);
+    } else if matches!(
+        action,
+        Action::CycleDpiPresets | Action::SetDpiPreset(_)
+    ) {
+        info!(
+            action = %action.label(),
+            "no DPI presets configured for active device — press ignored"
+        );
     }
 }
 
