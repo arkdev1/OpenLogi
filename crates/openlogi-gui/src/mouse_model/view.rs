@@ -46,7 +46,7 @@ const ASSET_HOTSPOT: f32 = 56.;
 /// Diameter of the always-visible marker dot at each hotspot's centre. The
 /// surrounding [`ASSET_HOTSPOT`] square stays as a transparent hit area so
 /// clicks remain forgiving.
-const HOTSPOT_DOT: f32 = 10.;
+const HOTSPOT_DOT: f32 = 12.;
 
 /// Vertical amplitude of the breathing loop. Two pixels reads as a soft
 /// rise/fall without feeling unstable.
@@ -281,10 +281,16 @@ fn asset_hotspots_for_png(asset: &ResolvedAsset, mouse_w: f32, mouse_h: f32) -> 
             })
         })
         .collect();
+    // Fallback positions for primary clicks. Logi omits these from the
+    // assignment array (Options+ never lets you rebind L/R click), but
+    // we still want them in the UI. Anchored relative to the visible
+    // wheel marker (~75.5, 19 on side_core for MX Master 4) so they sit
+    // on the foreshortened top-front surface: LeftClick just forward and
+    // a bit left of the wheel, RightClick forward and a bit right.
     let has_left = hotspots.iter().any(|h| h.id == ButtonId::LeftClick);
     let has_right = hotspots.iter().any(|h| h.id == ButtonId::RightClick);
     if !has_left {
-        let (cx, cy) = marker_to_canvas(28., 12.);
+        let (cx, cy) = marker_to_canvas(70., 12.);
         hotspots.push(Hotspot {
             id: ButtonId::LeftClick,
             x: cx - ASSET_HOTSPOT / 2.,
@@ -294,7 +300,7 @@ fn asset_hotspots_for_png(asset: &ResolvedAsset, mouse_w: f32, mouse_h: f32) -> 
         });
     }
     if !has_right {
-        let (cx, cy) = marker_to_canvas(72., 12.);
+        let (cx, cy) = marker_to_canvas(82., 14.);
         hotspots.push(Hotspot {
             id: ButtonId::RightClick,
             x: cx - ASSET_HOTSPOT / 2.,
@@ -571,15 +577,24 @@ impl RenderOnce for HotspotTrigger {
             .justify_center()
             .w(px(hotspot.w))
             .h(px(hotspot.h))
+            // Marker dot: dark core + thin light ring. The two-tone helps
+            // it read on both the light grey mouse top and any darker
+            // shadow areas; a plain mid-grey washed out on the light PNG.
             .child(
                 div()
                     .w(px(HOTSPOT_DOT))
                     .h(px(HOTSPOT_DOT))
                     .rounded_full()
+                    .border_1()
+                    .border_color(if highlighted {
+                        gpui::Hsla::from(rgb(ACCENT_BLUE))
+                    } else {
+                        hsla(0., 0., 0.95, 0.85)
+                    })
                     .bg(if highlighted {
                         gpui::Hsla::from(rgb(ACCENT_BLUE))
                     } else {
-                        hsla(0., 0., 0.7, 0.75)
+                        hsla(0., 0., 0.18, 0.85)
                     }),
             )
             .on_hover(move |hovered, _window, cx| {
