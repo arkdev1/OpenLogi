@@ -5,8 +5,9 @@
   Follows Apple's 2025/2026 unified app-icon system (macOS Tahoe / Liquid
   Glass / Icon Composer): a single 1024×1024 canvas, a full-bleed
   rounded-rectangle ("squircle") enclosure, and separable background /
-  foreground layers. The motif is an ORIGINAL top-view mouse silhouette —
-  not Logitech's logo or any trademarked mark.
+  foreground layers. The motif is an ORIGINAL mouse silhouette — an
+  elegant, symmetric capsule (à la Magic Mouse / SF Symbols' computermouse)
+  with a scroll wheel and button seam. Not Logitech's logo or trademark.
 
   Two delivery paths:
    • Direct → .icns (cargo-bundle): rasterize this file as-is. The squircle
@@ -21,28 +22,24 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024"
      viewBox="0 0 1024 1024">
   <defs>
-    <!-- Background: lighter blue at top → deep brand blue at bottom. -->
     <linearGradient id="bg" x1="512" y1="0" x2="512" y2="1024"
                     gradientUnits="userSpaceOnUse">
       <stop offset="0" stop-color="#5C9DFF"/>
       <stop offset="1" stop-color="#1D4ED8"/>
     </linearGradient>
-    <!-- Soft top sheen for a subtle Liquid-Glass light-from-above feel. -->
     <linearGradient id="sheen" x1="512" y1="40" x2="512" y2="600"
                     gradientUnits="userSpaceOnUse">
       <stop offset="0" stop-color="#ffffff" stop-opacity="0.22"/>
       <stop offset="1" stop-color="#ffffff" stop-opacity="0"/>
     </linearGradient>
-    <!-- Mouse body: white with a faint cool tint toward the base. -->
-    <linearGradient id="body" x1="512" y1="230" x2="512" y2="824"
+    <linearGradient id="body" x1="512" y1="212" x2="512" y2="812"
                     gradientUnits="userSpaceOnUse">
       <stop offset="0" stop-color="#ffffff"/>
       <stop offset="1" stop-color="#E2ECFF"/>
     </linearGradient>
-    <!-- Scroll wheel: light top → deep blue, for a rolled-metal feel. -->
-    <linearGradient id="wheelg" x1="512" y1="266" x2="512" y2="362"
+    <linearGradient id="wheelg" x1="512" y1="270" x2="512" y2="374"
                     gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#5B9DFF"/>
+      <stop offset="0" stop-color="#5C9DFF"/>
       <stop offset="1" stop-color="#1D4ED8"/>
     </linearGradient>
   </defs>
@@ -53,18 +50,19 @@
   </g>
 
   <g id="foreground">
-    <!-- Original top-view mouse silhouette (two-radius body). -->
-    <path fill="url(#body)" d="M 633.04,361.25 L 633.90,350.94 L 633.88,340.60 L 632.98,330.29 L 631.22,320.10 L 628.60,310.10 L 625.14,300.35 L 620.86,290.93 L 615.81,281.91 L 610.01,273.35 L 603.50,265.30 L 596.34,257.84 L 588.57,251.02 L 580.24,244.87 L 571.43,239.46 L 562.20,234.80 L 552.60,230.95 L 542.71,227.93 L 532.59,225.75 L 522.33,224.44 L 512.00,224.00 L 501.67,224.44 L 491.41,225.75 L 481.29,227.93 L 471.40,230.95 L 461.80,234.80 L 452.57,239.46 L 443.76,244.87 L 435.43,251.02 L 427.66,257.84 L 420.50,265.30 L 413.99,273.35 L 408.19,281.91 L 403.14,290.93 L 398.86,300.35 L 395.40,310.10 L 392.78,320.10 L 391.02,330.29 L 390.12,340.60 L 390.10,350.94 L 390.96,361.25 L 353.25,670.00 L 354.91,680.38 L 357.24,690.63 L 360.25,700.70 L 363.90,710.55 L 368.20,720.15 L 373.11,729.44 L 378.63,738.39 L 384.72,746.95 L 391.36,755.10 L 398.52,762.79 L 406.17,770.00 L 414.28,776.69 L 422.81,782.83 L 431.72,788.40 L 440.98,793.37 L 450.55,797.73 L 460.38,801.44 L 470.43,804.51 L 480.67,806.90 L 491.04,808.62 L 501.50,809.65 L 512.00,810.00 L 522.50,809.65 L 532.96,808.62 L 543.33,806.90 L 553.57,804.51 L 563.62,801.44 L 573.45,797.73 L 583.02,793.37 L 592.28,788.40 L 601.19,782.83 L 609.72,776.69 L 617.83,770.00 L 625.48,762.79 L 632.64,755.10 L 639.28,746.95 L 645.37,738.39 L 650.89,729.44 L 655.80,720.15 L 660.10,710.55 L 663.75,700.70 L 666.76,690.63 L 669.09,680.38 L 670.75,670.00 Z"/>
+    <!-- Elegant symmetric capsule body (stadium): rounded top + bottom,
+         straight sides — calm and Magic-Mouse-like. -->
+    <rect x="356" y="212" width="312" height="600" rx="156" ry="156"
+          fill="url(#body)"/>
     <!-- Curved division where the two click buttons meet the body. -->
-    <path d="M 400,398 Q 512,420 624,398" fill="none" stroke="#2C6BE6"
+    <path d="M 382,404 Q 512,428 642,404" fill="none" stroke="#2C6BE6"
           stroke-width="9" stroke-linecap="round"/>
-    <!-- Vertical seam splitting the left / right buttons (the wheel sits
-         over its middle). -->
-    <path d="M 512,252 L 512,402" fill="none" stroke="#2C6BE6"
+    <!-- Vertical seam splitting the left / right buttons. -->
+    <path d="M 512,256 L 512,414" fill="none" stroke="#2C6BE6"
           stroke-width="9" stroke-linecap="round"/>
     <!-- Scroll wheel + a soft sheen stripe. -->
-    <rect x="489" y="266" width="46" height="96" rx="23" fill="url(#wheelg)"/>
-    <rect x="500" y="280" width="7" height="68" rx="3.5" fill="#DCE8FF"
+    <rect x="486" y="272" width="52" height="104" rx="26" fill="url(#wheelg)"/>
+    <rect x="498" y="288" width="8" height="74" rx="4" fill="#DCE8FF"
           opacity="0.55"/>
   </g>
 </svg>
