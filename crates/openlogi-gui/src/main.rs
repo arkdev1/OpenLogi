@@ -4,6 +4,7 @@
 //! the main thread, so we can't move it onto a tokio runtime). Live polling
 //! lands when there's something to react to.
 
+mod accessibility_watcher;
 mod app;
 mod app_menu;
 mod app_watcher;
@@ -42,6 +43,12 @@ use crate::app::AppView;
 use crate::hardware::{toggle_smartshift_in_background, write_dpi_in_background};
 use crate::state::{AppState, DpiCycleState};
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "top-level startup orchestration (single-instance, config, asset sync, \
+              watchers, window, drain loop); splitting would scatter tightly-coupled \
+              setup across helpers that each take most of these locals"
+)]
 fn main() -> Result<()> {
     init_tracing();
 
@@ -94,9 +101,11 @@ fn main() -> Result<()> {
     // callback without GPUI thread involvement.
     let (hook_bindings, dpi_cycle, initial_config) = load_config_and_bindings(&inventories);
 
-    // Start the OS hook. `_hook` is held alive for the duration of `run`;
-    // both Arcs are captured by the callback closure.
-    let _hook = start_hook(Arc::clone(&hook_bindings), Arc::clone(&dpi_cycle));
+    // The OS hook is installed lazily from the drain loop the moment
+    // Accessibility is granted (see `accessibility_rx` below), so a user who
+    // grants permission while the app is running doesn't need to relaunch.
+    // These clones are what that late `start_hook` call captures.
+    let hook_arcs = (Arc::clone(&hook_bindings), Arc::clone(&dpi_cycle));
 
     // P1.6: poll for HID hot-plug / disconnect every 2s. Updates flow
     // through `inventory_rx` into AppState::refresh_inventories below.
@@ -105,6 +114,10 @@ fn main() -> Result<()> {
     // P1.4: poll for foreground-app changes every 1s. Empty channel on
     // non-macOS — the loop below falls through.
     let mut app_rx = app_watcher::spawn(std::time::Duration::from_secs(1));
+
+    // Watch the macOS Accessibility grant so the gate auto-dismisses and the
+    // hook installs the instant the user toggles the checkbox.
+    let mut accessibility_rx = accessibility_watcher::spawn(std::time::Duration::from_millis(1200));
 
     gpui_platform::application().run(move |cx| {
         gpui_component::init(cx);
@@ -173,6 +186,9 @@ fn main() -> Result<()> {
             // The two streams produce events at human pace (≤ 1 Hz combined
             // in steady state), so any reasonable scheduling fairness is
             // good enough.
+            // Holds the OS hook once Accessibility is granted, keeping its
+            // background run-loop thread alive for the rest of the session.
+            let mut hook_handle = None;
             loop {
                 tokio::select! {
                     Some(new_inv) = inventory_rx.recv() => {
@@ -190,6 +206,23 @@ fn main() -> Result<()> {
                             });
                         });
                     }
+                    Some(granted) = accessibility_rx.recv() => {
+                        cx.update(|cx| {
+                            if cx.has_global::<AppState>() {
+                                cx.update_global::<AppState, _>(|state, _| {
+                                    state.accessibility_granted = granted;
+                                });
+                            }
+                            // AppView doesn't observe AppState, so nudge a
+                            // repaint to re-evaluate the permission gate.
+                            cx.refresh_windows();
+                        });
+                        if granted && hook_handle.is_none() {
+                            info!("accessibility granted — installing OS mouse hook");
+                            hook_handle =
+                                start_hook(Arc::clone(&hook_arcs.0), Arc::clone(&hook_arcs.1));
+                        }
+                    }
                     else => break,
                 }
             }
@@ -197,11 +230,9 @@ fn main() -> Result<()> {
         .detach();
     });
 
-    // `_hook` drops here. On macOS `Hook::stop()` is called via `Drop`.
-    // A `Drop` impl on `Hook` calling `stop` would be ideal but requires the
-    // hook inner state to be `Option<HookInner>` — that's a P0.1 follow-up.
-    // For now the background thread keeps running until the process exits,
-    // which is fine for a single-window app that terminates cleanly.
+    // The OS hook (installed lazily in the drain loop) lives in the detached
+    // task's `_hook_handle`; its run-loop thread keeps running until the
+    // process exits, which is fine for a single-window app.
     Ok(())
 }
 

@@ -20,6 +20,7 @@ use std::sync::{Arc, RwLock};
 use gpui::Global;
 use openlogi_core::config::Config;
 use openlogi_core::device::DeviceInventory;
+use openlogi_hook::Hook;
 use tracing::{debug, warn};
 
 use crate::asset::{AssetCache, ResolvedAsset};
@@ -98,6 +99,10 @@ pub struct AppState {
     /// action picker for that direction. Pure UI scratch state — not
     /// persisted to disk.
     pub gesture_edit: Option<GestureDirection>,
+    /// Whether the process holds macOS Accessibility permission. Drives the
+    /// permission gate; flipped by the accessibility watcher when the user
+    /// grants access. Always `true` on platforms without the concept.
+    pub accessibility_granted: bool,
     /// Bindings for the *currently selected* device. Reloaded whenever the
     /// carousel selection changes.
     pub button_bindings: BTreeMap<ButtonId, Action>,
@@ -161,6 +166,7 @@ impl AppState {
             current_app_bundle: None,
             active_button: None,
             gesture_edit: None,
+            accessibility_granted: Hook::has_accessibility(),
             button_bindings: BTreeMap::new(),
             gesture_bindings: BTreeMap::new(),
             dpi: DEFAULT_DPI,

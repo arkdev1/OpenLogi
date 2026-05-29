@@ -6,8 +6,9 @@
 //! (placeholders for the eventual multi-tab config panel).
 
 use gpui::{
-    AppContext as _, Context, Entity, FontWeight, InteractiveElement, IntoElement, ParentElement,
-    Render, Styled, Subscription, Window, div, px,
+    AnyElement, AppContext as _, Context, Entity, FontWeight, InteractiveElement, IntoElement,
+    ParentElement, Render, StatefulInteractiveElement as _, Styled, Subscription, Window, div, px,
+    rgb,
 };
 use gpui_component::{h_flex, v_flex};
 use openlogi_core::config::Config;
@@ -34,6 +35,10 @@ pub struct AppView {
     /// subscription isn't dropped.
     #[allow(dead_code, reason = "held to keep the appearance observer alive")]
     appearance_obs: Option<Subscription>,
+    /// Session-only "skip" for the Accessibility permission gate, so a user
+    /// who only wants the HID++ features (DPI, SmartShift) isn't trapped on
+    /// the gate. Resets on relaunch; ignored once permission is granted.
+    accessibility_dismissed: bool,
 }
 
 impl AppView {
@@ -80,6 +85,7 @@ impl AppView {
             dpi_panel,
             gesture_pad,
             appearance_obs: None,
+            accessibility_dismissed: false,
         }
     }
 
@@ -88,11 +94,102 @@ impl AppView {
     pub fn set_appearance_obs(&mut self, sub: Subscription) {
         self.appearance_obs = Some(sub);
     }
+
+    /// Full-window onboarding shown while macOS Accessibility is ungranted.
+    /// Explains why the permission is needed, links to System Settings, and
+    /// offers a session skip. The drain loop flips `accessibility_granted`
+    /// (and repaints) the moment the user toggles the checkbox, so this
+    /// disappears on its own.
+    fn accessibility_gate(pal: Palette, cx: &mut Context<Self>) -> AnyElement {
+        v_flex()
+            .size_full()
+            .bg(pal.bg)
+            .text_color(pal.text_primary)
+            .items_center()
+            .justify_center()
+            .gap_4()
+            .p_8()
+            .child(
+                div()
+                    .text_xl()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child("需要「辅助功能」权限"),
+            )
+            .child(
+                div()
+                    .max_w(px(440.))
+                    .text_sm()
+                    .text_color(pal.text_muted)
+                    .child(
+                        "OpenLogi 通过系统的「辅助功能」权限捕获鼠标按键(后退 / 前进 / \
+                         手势按钮)并执行你绑定的操作。DPI、SmartShift 等直接与设备通信的 \
+                         功能不受影响。",
+                    ),
+            )
+            .child(
+                div()
+                    .id("open-accessibility")
+                    .px_4()
+                    .py_2()
+                    .rounded_md()
+                    .bg(rgb(theme::ACCENT_BLUE))
+                    .text_color(rgb(0x00ff_ffff))
+                    .font_weight(FontWeight::MEDIUM)
+                    .cursor_pointer()
+                    .child("打开系统设置授权")
+                    .on_click(|_, _, _| open_accessibility_settings()),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(pal.text_muted)
+                    .child("授权后会自动生效,无需重启。"),
+            )
+            .child(
+                div()
+                    .id("skip-accessibility")
+                    .text_xs()
+                    .text_color(pal.text_muted)
+                    .cursor_pointer()
+                    .hover(|s| s.text_color(pal.text_primary))
+                    .child("稍后再说(仅使用 DPI 等功能)")
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.accessibility_dismissed = true;
+                        cx.notify();
+                    })),
+            )
+            .into_any_element()
+    }
+}
+
+/// Raise the macOS Accessibility prompt (registers the app in the list) and
+/// open the matching System Settings pane. macOS-only by construction — the
+/// gate that calls this never shows on platforms where permission is implicit.
+fn open_accessibility_settings() {
+    openlogi_hook::Hook::prompt_accessibility();
+    if let Err(e) = std::process::Command::new("open")
+        .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")
+        .spawn()
+    {
+        warn!(error = %e, "could not open System Settings");
+    }
 }
 
 impl Render for AppView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let pal = theme::palette(cx);
+
+        // Gate the whole UI on Accessibility until granted (or skipped this
+        // session). Without it the OS hook can't capture any button, so
+        // remapping silently does nothing — the gate explains why and links
+        // straight to System Settings.
+        let granted = cx
+            .try_global::<AppState>()
+            .is_none_or(|s| s.accessibility_granted);
+        if !granted && !self.accessibility_dismissed {
+            return Self::accessibility_gate(pal, cx);
+        }
+
         v_flex()
             .size_full()
             .bg(pal.bg)
@@ -107,6 +204,7 @@ impl Render for AppView {
                 pal,
             ))
             .child(footer(pal))
+            .into_any_element()
     }
 }
 

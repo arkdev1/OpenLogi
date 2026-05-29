@@ -153,6 +153,22 @@ impl Hook {
             true
         }
     }
+
+    /// Show the macOS Accessibility permission dialog and register this
+    /// process in System Settings → Privacy & Security → Accessibility.
+    ///
+    /// Unlike [`Self::has_accessibility`], this passes the
+    /// `kAXTrustedCheckOptionPrompt` option, so macOS surfaces the native
+    /// "open System Settings" dialog the first time and lists the app there
+    /// (otherwise the user would have to add the binary by hand). Called for
+    /// its side effect; the resulting trust state is observed separately via
+    /// [`Self::has_accessibility`]. No-op on non-macOS.
+    pub fn prompt_accessibility() {
+        #[cfg(target_os = "macos")]
+        {
+            macos::prompt_accessibility();
+        }
+    }
 }
 
 /// Return the macOS bundle identifier of the currently frontmost application,
@@ -203,10 +219,13 @@ mod macos {
     unsafe impl Send for HookInner {}
 
     // Raw FFI for `AXIsProcessTrustedWithOptions` from the Accessibility
-    // framework. Passing `NULL` queries trust state without prompting.
+    // framework. Passing `NULL` queries trust state without prompting; passing
+    // a dictionary with `kAXTrustedCheckOptionPrompt = true` raises the system
+    // permission dialog and registers the process in the Accessibility list.
     #[link(name = "ApplicationServices", kind = "framework")]
     unsafe extern "C" {
         fn AXIsProcessTrustedWithOptions(options: *const std::ffi::c_void) -> bool;
+        static kAXTrustedCheckOptionPrompt: core_foundation::string::CFStringRef;
     }
 
     /// Check whether this process has been granted Accessibility access.
@@ -214,6 +233,29 @@ mod macos {
         // SAFETY: NULL is documented as a valid argument; it queries the current
         // trust state without raising a permission dialog.
         unsafe { AXIsProcessTrustedWithOptions(std::ptr::null()) }
+    }
+
+    /// Raise the Accessibility prompt + register the process. See
+    /// [`super::Hook::prompt_accessibility`].
+    pub(crate) fn prompt_accessibility() {
+        use core_foundation::base::TCFType as _;
+        use core_foundation::boolean::CFBoolean;
+        use core_foundation::dictionary::CFDictionary;
+        use core_foundation::string::CFString;
+
+        // SAFETY: `kAXTrustedCheckOptionPrompt` is a framework-provided
+        // `CFStringRef` constant; wrapping under the get rule borrows it
+        // without taking ownership.
+        let key = unsafe { CFString::wrap_under_get_rule(kAXTrustedCheckOptionPrompt) };
+        let options = CFDictionary::from_CFType_pairs(&[(
+            key.as_CFType(),
+            CFBoolean::true_value().as_CFType(),
+        )]);
+        // SAFETY: `options` is a valid `CFDictionaryRef` for the lifetime of
+        // the call; the function reads it and (if untrusted) shows the dialog.
+        // The returned trust state is observed separately via the watcher.
+        let _trusted =
+            unsafe { AXIsProcessTrustedWithOptions(options.as_concrete_TypeRef().cast()) };
     }
 
     /// Read the frontmost application's bundle identifier via NSWorkspace.
